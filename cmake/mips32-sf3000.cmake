@@ -1,0 +1,23 @@
+# Match TreeFrogUI_picoarch's little-endian o32 hard-float ABI.
+# Supply the SF3000 SDK compiler prefix and sysroot; do not substitute a
+# generic distribution sysroot for a device-release build.
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR mipsel)
+if(NOT DEFINED ENV{CROSS_COMPILE} OR NOT DEFINED ENV{SF3000_SYSROOT})
+  message(FATAL_ERROR "Set CROSS_COMPILE and SF3000_SYSROOT to the SF3000 SDK")
+endif()
+set(CMAKE_C_COMPILER "$ENV{CROSS_COMPILE}gcc")
+set(CMAKE_AR "$ENV{CROSS_COMPILE}ar")
+set(CMAKE_RANLIB "$ENV{CROSS_COMPILE}ranlib")
+set(CMAKE_STRIP "$ENV{CROSS_COMPILE}strip")
+set(CMAKE_SYSROOT "$ENV{SF3000_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CMAKE_C_FLAGS_INIT "-EL -mabi=32 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -mno-mips16 -fno-strict-aliasing -ffunction-sections -fdata-sections")
+set(HCGBA_PICOARCH ON CACHE BOOL "")
+set(HCGBA_CACHED_CPU ON CACHE BOOL "")
+set(HCGBA_LTO OFF CACHE BOOL "")
+set(BUILD_TESTING OFF CACHE BOOL "")

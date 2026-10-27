@@ -1,3 +1,15 @@
+# HCGBA — MIPS32 / picoarch port
+
+For the SF3000 and R36S V2.6 port, build instructions, test coverage and current
+limits, see [picoarch/README.md](picoarch/README.md). The MIPS backend translates
+eligible ARM/Thumb ALU instructions and retains the existing exact CPU for other
+instructions. Device speed and Hamtaro compatibility have not yet been measured.
+
+The original armGBA documentation follows. Its benchmark and compatibility
+claims are upstream results, not measurements of this MIPS port.
+
+---
+
 # armGBA
 
 A Game Boy Advance, Game Boy and Game Boy Color libretro core for low-power handhelds.

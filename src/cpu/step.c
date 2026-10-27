@@ -13,6 +13,9 @@
 #include "decode.h"
 #include "gba.h"
 #include "jit-internal.h"
+#ifdef HCGBA_CACHED_CPU
+#include "cached.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -641,7 +644,7 @@ void stepTrace(struct GBA* gba) {
 // Runs one instruction: an IRQ is taken first if one is waiting, then the pipeline moves on a place
 // (the fetch for two instructions ahead goes out on the bus now), and the instruction at its head
 // runs.
-static void step(struct GBA* gba) {
+static void step(struct GBA* gba, bool cached) {
 	struct CPU* cpu = &gba->cpu;
 	if (gba->irq.line && !cpu->irqMasked) {
 		takeIrq(gba);
@@ -654,18 +657,35 @@ static void step(struct GBA* gba) {
 	// The I flag as it is before the instruction decides whether an IRQ is taken after it.
 	cpu->irqMasked = cpu->cpsr & PSR_I;
 	cpu->prefetch[0] = cpu->prefetch[1];
-	struct Inst in;
+	struct Inst decoded;
+	const struct Inst* in = &decoded;
+#ifdef HCGBA_CACHED_CPU
+	struct HcDecoded* entry = NULL;
+#endif
+	int width = thumb ? 2 : 4;
+	cpu->r[15] += width;
+	cpu->prefetch[1] = busFetch(gba, cpu->r[15], thumb);
+	uint32_t address = cpu->r[15] - 2 * width;
+#ifdef HCGBA_CACHED_CPU
+	if (cached && gba->jit) {
+		// Use the pipeline opcode, not a fresh memory read. A store can change
+		// memory while either of the two prefetched opcodes is still stale.
+		entry = hcCachedDecode(gba, address, opcode, thumb);
+		in = &entry->in;
+	} else
+#endif
 	if (thumb) {
-		cpu->r[15] += 2;
-		cpu->prefetch[1] = busFetch(gba, cpu->r[15], true);
-		decodeThumb(&in, cpu->r[15] - 4, (uint16_t) opcode);
+		decodeThumb(&decoded, address, (uint16_t) opcode);
 	} else {
-		cpu->r[15] += 4;
-		cpu->prefetch[1] = busFetch(gba, cpu->r[15], false);
-		decodeArm(&in, cpu->r[15] - 8, opcode);
+		decodeArm(&decoded, address, opcode);
 	}
-	if (in.cond == COND_AL || passes(cpu->cpsr, in.cond)) {
-		stepExecute(gba, &in);
+	if (in->cond == COND_AL || passes(cpu->cpsr, in->cond)) {
+#ifdef HCGBA_CACHED_CPU
+		if (entry && entry->native) {
+			entry->native(cpu);
+		} else
+#endif
+		stepExecute(gba, in);
 	}
 }
 
@@ -679,5 +699,11 @@ void stepReset(struct GBA* gba) {
 
 // Steps one instruction
 void stepInstruction(struct GBA* gba) {
-	step(gba);
+	step(gba, false);
 }
+
+#ifdef HCGBA_CACHED_CPU
+void stepCachedInstruction(struct GBA* gba) {
+	step(gba, true);
+}
+#endif
