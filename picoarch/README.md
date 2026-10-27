@@ -31,7 +31,18 @@ export SF3000_SYSROOT=/path/to/sdk/mipsel-buildroot-linux-gnu/sysroot
 sh picoarch/build-sf3000.sh
 ```
 
-The output is `build-sf3000/hcgba_libretro.so`. The GitHub Actions workflow
+The output is `build-sf3000/hcgba_libretro.so`.
+
+A portable fallback, validated with Zig 0.13.0, is:
+
+```sh
+python3 picoarch/build-zig.py --zig /path/to/zig
+```
+
+It emits the same MIPS32r2/o32/hard-float ABI, using glibc 2.19 symbol
+versions. Its imports have been checked against the SDK's glibc 2.20.
+The supplied test binary was built this way; the actual handheld has not
+been tested. The GitHub Actions workflow
 builds with a pinned SF3000 SDK and packages the core. Its separate Debian MIPS
 build is only for QEMU tests: a generic Linux MIPS library can require a newer
 libc than the handheld, so do not deploy that test build.
@@ -109,7 +120,9 @@ synthetic tests proves neither a Hamtaro fix nor full-library compatibility.
 
 ## Source and licenses
 
-Base: MarsInsanity/HCGBA commit
+Upstream updates through `1f97fae` are integrated; see [UPSTREAM.md](UPSTREAM.md).
+
+Initial base: MarsInsanity/HCGBA commit
 `132c881d8f00b758dd87b3ea213f08fc1b0911b7`.
 The repository already contains mGBA-derived code; all notices are retained.
 New port files are MPL-2.0. The compact GBA-only target does not link Gambatte;

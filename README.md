@@ -190,8 +190,10 @@ The menu has four tabs, which L and R move between (Q and E, or Tab, on the keyb
 too on a row without a value), and it opens again where it was left. General has the recent games,
 Load Game, the AppImage's own settings and Quit: Video (window, scaling, vsync, and the frame rate
 and messages on screen), Shaders for what the GPU draws (Sharp, Smooth, and its LCD grid and Game
-Boy pixel shadow), the sound's volume and latency, controls, Fast-Forward and Rewind (with
-Run-Ahead), Saves and Folders (Auto Save State, and where games, BIOS files, saves, states and
+Boy pixel shadow), the sound's volume and latency, controls (with Players, which controller plays
+each player, as RetroArch's Device Index, remembered for when they connect again; a ROCKNIX
+handheld's own controls show as Built-In Controls), Fast-Forward and Rewind (with Run-Ahead), Saves
+and Folders (Auto Save State, and where games, BIOS files, saves, states and
 screenshots are; the Games folder is found by itself, ROCKNIX's roms or a roms folder holding gb,
 gbc or gba, and Load Game opens there with those three first), the menus' look (accent color, size,
 background), and Reset All Settings. Game has the loaded game's state slots (0 to 99, each with a
@@ -207,8 +209,15 @@ press, said at the bottom left. Netplay is armgba to armgba. Its page has Link M
 Controls, as Core's Link page has them, and Create a Host Session links the devices as they say: Off is one console every player shares, as Shared Controls says
 (everyone's buttons at once if it's off), for up to four players; Together runs every player's
 console on every device, kept in step with rollback; Separate carries the link cable between two
-devices each running its own game. Join lists the hosts on the local network, found by a broadcast
-on the netplay port, with each host's Link Mode and players, or takes an address. `--host` (as
+devices each running its own game. In Off and Together, each controller on a device is a player, in
+order, as far as the session's players go; Separate is a player a device. Off and Together need no
+game loaded to join: the host's game loads from your folders by its file name (beside your game, in
+the game list's folder, the Game Boy, Game Boy Color and Game Boy Advance folders, or the Games folder
+two levels down), if it's the same file as the host's, and if it isn't there by that name, the game
+list opens to choose your copy; Separate needs your own game, or Your
+Cartridge: Removed. Join's Scan for Local Hosts lists the sessions on the local network below it,
+found by a broadcast on the netplay port and updated while shown, with each host's Link Mode and
+players; choosing it again scans afresh. Join a Host... takes an address. `--host` (as
 Link Mode says), `--host-off`, `--host-together`, `--host-separate` and `--connect ADDRESS` start it
 from the command line. Achievements need the system's libcurl, and recording its ffmpeg.
 

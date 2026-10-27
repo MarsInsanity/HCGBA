@@ -221,8 +221,15 @@ static void shownPath(char* out, size_t size, const char* path) {
 }
 
 // The game list: the folder's path and counts, "..", then each folder and game.
+// Set while the game list chooses a game for uiPickGame, with the game it's looking for.
+static bool (*gamePicked)(const char* path);
+static char gameWanted[NAME_SIZE];
+
 void browserMenu(void) {
 	readBrowser();
+	if (gamePicked) {
+		addInfo("Looking For", gameWanted);
+	}
 	// The folder's name, and how many games and folders it holds.
 	int folders = 0;
 	for (int i = 0; i < browserCount; ++i) {
@@ -375,8 +382,8 @@ void browserFind(char c) {
 	}
 }
 
-// A game list row: ".." (index -1) goes up, selecting the folder left; a folder opens; a game loads; a
-// cheat file's cheats are added to the game's.
+// A game list row: ".." (index -1) goes up, selecting the folder left; a folder opens; a game loads,
+// or goes to uiPickGame's picked; a cheat file's cheats are added to the game's.
 static void browse(int index, int delta) {
 	if (delta) {
 		return;
@@ -432,9 +439,33 @@ static void browse(int index, int delta) {
 			osd(added == 1 ? "Added 1 cheat" : "Added %d cheats", added);
 			popMenu();
 		}
+	} else if (gamePicked) {
+		if (gamePicked(path)) {
+			gamePicked = NULL;
+			uiCloseMenu();
+		}
 	} else if (loadGame(path)) {
 		uiCloseMenu();
 	}
+}
+
+// The game list for choosing a game another way than playing it, netplay's copy of the host's: a
+// file chosen goes to picked, which says whether it's the one; the list stays open until it is.
+void uiPickGame(const char* title, const char* wanted, bool (*picked)(const char* path)) {
+	gamePicked = picked;
+	if (!picked) {
+		return;
+	}
+	snprintf(gameWanted, sizeof(gameWanted), "%s", wanted);
+	uiOpenMenu();
+	browserCheats = false;
+	snprintf(browserPath, sizeof(browserPath), "%s", gamesDirectory[0] ? gamesDirectory : settings.directory);
+	browserListed[0] = '\0';
+	pushMenu(browserMenu, title);
+}
+
+bool uiPickingGame(void) {
+	return gamePicked && app.menuOpen && depth && stack[depth - 1].build == browserMenu;
 }
 
 // A game list shortcut: a console's folder, the last game's, or the Games folder.
@@ -979,7 +1010,7 @@ static void gameplayMenu(void) {
 	addValue("Fast-Forward Speed", text, changeSetting, SET_FAST_FORWARD);
 	helpFor("How fast the Fast-Forward hotkey runs the game while it's held. Max is as fast as it goes, up to 12x.");
 	addValue("Rewind", onOff(settings.rewind), changeSetting, SET_REWIND);
-	helpFor("Hold the Rewind hotkey to go back in time.");
+	helpFor("Goes back in time while the Rewind hotkey is held.");
 	snprintf(text, sizeof(text), "%d MB", settings.rewindMegabytes);
 	addValue("Rewind Buffer", text, changeSetting, SET_REWIND_SIZE);
 	helpFor("Memory kept for rewinding: more goes further back.");
@@ -1068,9 +1099,61 @@ static void keyControlsMenu(void) {
 	}
 }
 
+// Players: a player's row gives it the next connected controller, or none, in the order they
+// connected; the player that had it takes this one's, so each controller plays one player.
+static void choosePlayer(int port, int delta) {
+	SDL_GameController* order[PORTS + 1];
+	int count = 0;
+	bool empty = false;
+	for (int p = 0; p < PORTS; ++p) {
+		if (!app.pads[p]) {
+			empty = true;
+			continue;
+		}
+		SDL_JoystickID const id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(app.pads[p]));
+		int at = count++;
+		while (at > 0 && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(order[at - 1])) > id) {
+			order[at] = order[at - 1];
+			--at;
+		}
+		order[at] = app.pads[p];
+	}
+	if (empty) {
+		order[count++] = NULL;
+	}
+	int at = 0;
+	for (int i = 0; i < count; ++i) {
+		at = order[i] == app.pads[port] ? i : at;
+	}
+	SDL_GameController* const next = count > 1 ? order[wrap(at, delta ? delta : 1, count)] : app.pads[port];
+	for (int p = 0; p < PORTS; ++p) {
+		if (p != port && app.pads[p] == next) {
+			swapPlayers(port, p);
+			return;
+		}
+	}
+}
+
+static void playersMenu(void) {
+#ifdef __ANDROID__
+	const char* const firstAlone = settings.touchControls ? "On-Screen Controls" : "None";
+#else
+	const char* const firstAlone = "Keyboard";
+#endif
+	for (int p = 0; p < PORTS; ++p) {
+		char label[16];
+		snprintf(label, sizeof(label), "Player %d", p + 1);
+		addValue(label, app.pads[p] ? playerPadName(p) : p ? "None" : firstAlone, choosePlayer, p);
+		helpFor("The controller this player uses. Left and right pick another connected controller, and the player who had it "
+		        "takes this one's. Remembered for when they connect again.");
+	}
+}
+
 static void openControlsPage(int which, int delta) {
+	static void (*const pages[])(void) = { padControlsMenu, keyControlsMenu, playersMenu };
+	static const char* const titles[] = { "Controller", "Keyboard", "Players" };
 	if (!delta) {
-		pushMenu(which ? keyControlsMenu : padControlsMenu, which ? "Keyboard" : "Controller");
+		pushMenu(pages[which], titles[which]);
 	}
 }
 
@@ -1079,12 +1162,14 @@ static void controlsMenu(void) {
 	helpFor("The buttons and hotkeys on a controller, the same for each player's.");
 	addItem("Keyboard...", openControlsPage, 1);
 	helpFor("The keys and hotkeys on the keyboard, which plays player 1.");
+	addItem("Players...", openControlsPage, 2);
+	helpFor("Which controller plays each player, here and in netplay.");
 #ifdef __ANDROID__
 	addValue("On-Screen Controls", onOff(settings.touchControls), changeSetting, SET_TOUCH);
 	helpFor("A controller on the screen, played by touch, there while no other controller is connected.");
 #endif
 	addValue("Swap A/B and X/Y", onOff(settings.swapFaceButtons), changeSetting, SET_SWAP_FACE_BUTTONS);
-	helpFor("Off: A is the right face button and B the bottom one, as on a Game Boy and in RetroArch. On: A is the bottom one and B the right; X and Y swap too. On every controller.");
+	helpFor("Off: A is the right face button and B the bottom one, as on a Game Boy and in RetroArch. On: they swap, and X and Y too.");
 	addItem("Reset Controls and Hotkeys", resetControls, 0);
 	helpFor("Puts every button, key and hotkey back as it first was.");
 	items[itemCount - 1].confirm = true;
@@ -1115,13 +1200,13 @@ static void openSettingsPage(int which, int delta) {
 
 static void addSettingsPages(void) {
 	addItem("Video...", openSettingsPage, 0);
-	helpFor("The window, scaling, vsync, and the frame rate and messages on screen.");
+	helpFor("The window, VSync, scaling, and the frame rate and messages on screen.");
 	addItem("Shaders...", openSettingsPage, 1);
 	helpFor("The filter, and the GPU's LCD grid and Game Boy pixel shadow.");
 	addItem("Audio...", openSettingsPage, 2);
 	helpFor("The volume, and how long sound waits to play.");
 	addItem("Controls...", openSettingsPage, 3);
-	helpFor("Buttons and hotkeys, for controllers and the keyboard.");
+	helpFor("Buttons and hotkeys for controllers and the keyboard, and Swap A/B and X/Y.");
 	addItem("Fast-Forward and Rewind...", openSettingsPage, 4);
 	helpFor("Fast-forward's speed, going back in time, and Run-Ahead, which answers the buttons sooner.");
 	addItem("Saves and Folders...", openSettingsPage, 5);
@@ -1398,6 +1483,8 @@ static void nicknameDone(const char* text) {
 
 // Your Cartridge: Removed starts the core with no game for joining, for a single-pak game.
 static bool joinNoCartridge;
+// Scan for Local Hosts was chosen: the sessions found are listed below it.
+static bool findingHosts;
 
 // The host's address, kept for the next time.
 static void joinDone(const char* text) {
@@ -1418,11 +1505,18 @@ static void portDone(const char* text) {
 	settingsWrite();
 }
 
-// Netplay's rows: Your Name (0), Create a Host Session (1), Join (3), Disconnect (4), Port (5) and
-// Your Cartridge (7).
+// Netplay's rows: Your Name (0), Create a Host Session (1), Join (3), Disconnect (4), Port (5),
+// Your Cartridge (7) and Scan for Local Hosts (8), which scans afresh when chosen again.
 static void netAction(int which, int delta) {
 	if (which == 7) {
 		joinNoCartridge = !joinNoCartridge;
+		return;
+	}
+	if (which == 8) {
+		if (!delta) {
+			netScanStop();
+			findingHosts = true;
+		}
 		return;
 	}
 	if (delta) {
@@ -1510,26 +1604,42 @@ static void netplayMenu(void) {
 		addHeader("Host");
 		addItem("Create a Host Session", netAction, 1);
 		helpFor("Hosts the loaded game, linked as Core's Link Mode says. Off: one console every player shares, as Shared "
-		        "Controls says. Together: every player's console on every device. Separate: two devices, each its own.");
+		        "Controls says. Together: every player's console on every device. Separate: two devices, each its own. In Off "
+		        "and Together, each controller here is a player.");
 		addHeader("Join");
 		addValue("Your Cartridge", joinNoCartridge ? "Removed" : "Inserted", netAction, 7);
 		helpFor("Removed: joins with no game, for a single-pak game the host's console sends over the cable, as a real one "
 		        "does. Needs a host on Link Mode Separate. The game file is never sent.");
 		addItem("Join a Host...", netAction, 3);
-		helpFor("Type the host's name or address.");
-		const struct NetHost* hosts;
-		int const count = netScan(&hosts);
-		for (int i = 0; i < count; ++i) {
-			char label[192], value[64];
-			snprintf(label, sizeof(label), "%s: %s", hosts[i].nickname, hosts[i].game);
-			static const char* const shared[] = { "", ", Everyone", ", Pass Around" };
-			snprintf(value, sizeof(value), "Link Mode %s%s, %d/%d", netLinkNames[hosts[i].how],
-			         hosts[i].how == LINK_OFF ? shared[hosts[i].shared] : "", hosts[i].players, hosts[i].most);
-			addChoice(label, value, joinFound, i);
-			helpFor("A host on this network. Joins it.");
-		}
-		if (!count) {
-			addInfo("Hosts", "Looking on this network...");
+		helpFor("Type the host's name or address. In Off and Together, your copy of the host's game loads by itself, and each "
+		        "controller here is a player.");
+		addItem("Scan for Local Hosts", netAction, 8);
+		helpFor(findingHosts ? "Clears the list below and scans again. The list also updates by itself while it shows."
+		                     : "Scans this network for sessions, and lists them below as they're found.");
+		// Looking only once asked, and while this page shows.
+		static Uint32 builtAt;
+		findingHosts &= SDL_GetTicks() - builtAt < 1000;
+		builtAt = SDL_GetTicks();
+		if (findingHosts) {
+			const struct NetHost* hosts;
+			int const count = netScan(&hosts);
+			char found[32];
+			snprintf(found, sizeof(found), count ? "%d found" : "None yet", count);
+			addInfo("Scanning this network...", found);
+			asGame();
+			for (int i = 0; i < count; ++i) {
+				char label[192], value[64];
+				snprintf(label, sizeof(label), "%s: %s", hosts[i].nickname, hosts[i].game);
+				static const char* const shared[] = { "", ", Everyone", ", Pass Around" };
+				snprintf(value, sizeof(value), "Link Mode %s%s, %d/%d", netLinkNames[hosts[i].how],
+				         hosts[i].how == LINK_OFF ? shared[hosts[i].shared] : "", hosts[i].players, hosts[i].most);
+				addChoice(label, value, joinFound, i);
+				asGame();
+				helpFor(hosts[i].how == LINK_SEPARATE ? "Joins this session. Separate: you play your own game, or Your Cartridge: "
+				                                        "Removed for a single-pak game."
+				                                      : "Joins this session. Your copy of the host's game loads by itself, and each "
+				                                        "controller here is a player.");
+			}
 		}
 	} else {
 		addItem("Disconnect", netAction, 4);
@@ -1728,7 +1838,7 @@ static void gameTab(void) {
 // Extras: netplay and RetroAchievements.
 static void extrasTab(void) {
 	addItem("Netplay...", openNetplay, 0);
-	helpFor("Play linked with another device over the network.");
+	helpFor("Playing with other devices over the network: hosting, joining, and the link.");
 	addItem("Achievements...", openCheevos, 0);
 	helpFor("RetroAchievements: log in, hardcore mode, and this game's achievements.");
 }

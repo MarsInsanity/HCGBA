@@ -97,6 +97,13 @@ static void lockstep(struct GBA* a,struct GBA* b) {
     void* state=malloc(gbaStateSize());
     CHECK(state);
     gbaSaveState(a,state);
+    // Upstream 1f97fae: host recompiler exit scratch cannot affect state bytes.
+    void* scratchState=malloc(gbaStateSize()); CHECK(scratchState);
+    a->exitPc=0x12345678; a->exitOps[0]=0x87654321; a->exitOps[1]=0x11223344;
+    a->exitReason=3; a->exitFlags=0xf0000000;
+    gbaSaveState(a,scratchState);
+    CHECK(!memcmp(state,scratchState,gbaStateSize()));
+    free(scratchState);
     CHECK(gbaLoadState(a,state,gbaStateSize()));
     CHECK(gbaLoadState(b,state,gbaStateSize()));
     free(state);
@@ -124,6 +131,12 @@ int main(void) {
         aluCase(a,b,op,false);
     }
 #endif
+    #ifdef HCGBA_CACHED_CPU
+    struct HcDecoded* inFlight=hcCachedDecode(a,0x08000000,0xe3a01055,false);
+    struct Inst preserved=inFlight->in;
+    jitRomChanged(a);
+    CHECK(!inFlight->valid && !memcmp(&preserved,&inFlight->in,sizeof(preserved)));
+    #endif
     lockstep(a,b);
     printf("PASS: %lu ALU cases (%lu native); ARM/Thumb bus+IRQ lockstep, stale prefetch, state reload\n",cases,nativeCases);
     gbaDestroy(a); gbaDestroy(b);

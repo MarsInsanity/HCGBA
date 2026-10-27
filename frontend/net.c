@@ -20,6 +20,7 @@
 #include "link.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -33,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -50,7 +52,7 @@ enum {
 	CHECK_FRAMES = 180,
 	CHECKS = 8,
 	MESSAGE_MOST = 32 << 20,
-	VERSION = 1,
+	VERSION = 2,
 };
 
 enum Message {
@@ -84,7 +86,9 @@ char netStatus[256];
 // A connection and what's waiting to be read from it and sent on it.
 struct Connection {
 	int fd;
+	// Its players, id to id + count - 1: one for each controller on the device, Together.
 	int id;
+	int count;
 	bool welcomed;
 	// A player who can't join, leaving.
 	bool turnedAway;
@@ -100,7 +104,8 @@ struct Connection {
 static int listener = -1, answerer = -1;
 // The host's connections to its players, or a client's to the host (connections[0]).
 static struct Connection connections[PEERS];
-static int self;
+// This device's players, self to self + selfCount - 1, its controllers in order.
+static int self, selfCount = 1;
 static unsigned pings;
 
 static const struct retro_netpacket_callback* packets;
@@ -114,6 +119,10 @@ static struct {
 static int keptCount;
 // Set while a client loads the host's game, which would otherwise end the session.
 static bool loadingForSession;
+// The host's welcome, kept while the player chooses their copy of the host's game.
+static uint8_t* heldWelcome;
+static size_t heldWelcomeSize;
+static char heldGame[256];
 
 struct Check {
 	int frame;
@@ -224,6 +233,35 @@ static void sendOthers(int except, int type, const void* payload, size_t size) {
 	}
 }
 
+static bool isLocal(int player) {
+	return player >= self && player < self + selfCount;
+}
+
+static bool owns(const struct Connection* c, int player) {
+	return c->fd >= 0 && player >= c->id && player < c->id + c->count;
+}
+
+// This device's controllers, a player each: up to the last one connected, at least one, as the
+// keyboard plays player 1.
+static int localPlayers(void) {
+	int count = 1;
+	for (int port = 1; port < PORTS; ++port) {
+		count = app.pads[port] ? port + 1 : count;
+	}
+	return count;
+}
+
+// "player 2", "players 2 and 3" or "players 2 to 4".
+static const char* playersText(int first, int count) {
+	static char text[32];
+	if (count <= 1) {
+		snprintf(text, sizeof(text), "player %d", first + 1);
+	} else {
+		snprintf(text, sizeof(text), count == 2 ? "players %d and %d" : "players %d to %d", first + 1, first + count);
+	}
+	return text;
+}
+
 static struct Connection* connectionFor(int id) {
 	for (int i = 0; i < PEERS; ++i) {
 		if (connections[i].fd >= 0 && connections[i].id == id) {
@@ -264,7 +302,8 @@ static void setStatus(void) {
 	} else if (!connections[0].welcomed) {
 		snprintf(netStatus, sizeof(netStatus), "Joining...");
 	} else {
-		snprintf(netStatus, sizeof(netStatus), "Player %d, Link Mode %s, %u ms", self + 1, how, (unsigned) roll.rtt);
+		snprintf(netStatus, sizeof(netStatus), "%s, Link Mode %s, %u ms", playersText(self, selfCount), how, (unsigned) roll.rtt);
+		netStatus[0] = 'P';
 	}
 }
 
@@ -531,7 +570,7 @@ static void sendState(struct Connection* c) {
 		sendTo(c, MSG_STATE, message, header + packed);
 		for (int p = 0; p < PEERS; ++p) {
 			int const first = SDL_max(frame, roll.joined[p]);
-			if (p != c->id && roll.joined[p] != INT_MAX && roll.known[p] >= first) {
+			if (!owns(c, p) && roll.joined[p] != INT_MAX && roll.known[p] >= first) {
 				sendInputs(p, first, roll.known[p], c);
 			}
 		}
@@ -573,8 +612,8 @@ static void takeState(const uint8_t* p, size_t size) {
 	for (int q = 0; q < PEERS; ++q) {
 		roll.joined[q] = (int) get32(p + 8 + q * 12);
 		roll.left[q] = (int) get32(p + 12 + q * 12);
-		// Their buttons from the frame on follow this message; this player's own are kept.
-		if (q != self || !roll.synced) {
+		// Their buttons from the frame on follow this message; this device's own are kept.
+		if (!isLocal(q) || !roll.synced) {
 			roll.known[q] = SDL_max(frame, roll.joined[q]) - 1;
 		}
 	}
@@ -604,15 +643,18 @@ static void runFrame(int avEnable) {
 	++roll.frame;
 }
 
-// This player's buttons for a frame the input delay ahead, then the next frame.
+// This device's players' buttons for a frame the input delay ahead, each from its controller, then
+// the next frame.
 static void advance(int avEnable) {
-	int const from = roll.known[self] + 1;
-	while (roll.known[self] < roll.frame + roll.delay) {
-		int const f = ++roll.known[self];
-		roll.buttons[self][f % RING] = f == roll.frame + roll.delay ? localButtons(0) : 0;
-	}
-	if (from <= roll.known[self]) {
-		sendInputs(self, from, roll.known[self], netMode == NET_JOINED ? &connections[0] : NULL);
+	for (int k = 0; k < selfCount; ++k) {
+		int const player = self + k, from = roll.known[player] + 1;
+		while (roll.known[player] < roll.frame + roll.delay) {
+			int const f = ++roll.known[player];
+			roll.buttons[player][f % RING] = f == roll.frame + roll.delay ? localButtons((unsigned) k) : 0;
+		}
+		if (from <= roll.known[player]) {
+			sendInputs(player, from, roll.known[player], netMode == NET_JOINED ? &connections[0] : NULL);
+		}
 	}
 	runFrame(avEnable);
 }
@@ -658,15 +700,17 @@ static void hostSendStates(void) {
 			continue;
 		}
 		c->wantsState = false;
-		if (roll.joined[c->id] == INT_MAX || roll.left[c->id] != INT_MAX) {
-			int const frame = SDL_min(confirmedFrame() + 1, roll.frame);
-			roll.joined[c->id] = frame;
-			roll.left[c->id] = INT_MAX;
-			roll.known[c->id] = frame - 1;
-			uint8_t message[9] = { (uint8_t) c->id };
-			put32(message + 1, (uint32_t) frame);
-			put32(message + 5, INT_MAX);
-			sendOthers(c->id, MSG_PLAYER, message, sizeof(message));
+		int const frame = SDL_min(confirmedFrame() + 1, roll.frame);
+		for (int id = c->id; id < c->id + c->count; ++id) {
+			if (roll.joined[id] == INT_MAX || roll.left[id] != INT_MAX) {
+				roll.joined[id] = frame;
+				roll.left[id] = INT_MAX;
+				roll.known[id] = frame - 1;
+				uint8_t message[9] = { (uint8_t) id };
+				put32(message + 1, (uint32_t) frame);
+				put32(message + 5, INT_MAX);
+				sendOthers(c->id, MSG_PLAYER, message, sizeof(message));
+			}
 		}
 		sendState(c);
 	}
@@ -798,12 +842,14 @@ static void hearBroadcasts(bool on);
 bool netHost(const char* link) {
 	char mode[16];
 	snprintf(mode, sizeof(mode), "%s", link ? link : optionValue("armgba_link_mode"));
-	bool const together = strcmp(mode, "separate"), single = !strcmp(mode, "off");
+	bool const separate = !strcmp(mode, "separate"), oneConsole = !strcmp(mode, "off");
+	// Every device runs every console, Together's or Off's one; Separate, each device its own.
+	bool const together = !separate;
 	netStop();
 	if (!app.loaded) {
 		return false;
 	}
-	if (together && !single && strcmp(mode, "together")) {
+	if (!separate && !oneConsole && strcmp(mode, "together")) {
 		osd("Netplay: Link Mode can be Off, Together or Separate");
 		return false;
 	}
@@ -827,15 +873,18 @@ bool netHost(const char* link) {
 	self = 0;
 	libretroSetNetplayPlayer(self);
 	resetSync();
+	selfCount = together ? SDL_min(localPlayers(), playersMost()) : 1;
 	// Off: one console the players share, as Shared Controls says, or everyone's buttons at once.
-	if (single && !strcmp(optionValue("armgba_shared_controls"), "off")) {
+	if (oneConsole && !strcmp(optionValue("armgba_shared_controls"), "off")) {
 		setOption("armgba_shared_controls", "everyone");
 	}
 	if (linkMode(mode)) {
-		osd(!together ? "Restarted for the link cable" : single ? "Restarted with one console, shared" : "Restarted with every player's console");
+		osd(separate ? "Restarted for the link cable" : oneConsole ? "Restarted with one console, shared" : "Restarted with every player's console");
 	}
 	if (together) {
-		roll.joined[0] = 0;
+		for (int p = 0; p < selfCount; ++p) {
+			roll.joined[p] = 0;
+		}
 		if (!ensureStates()) {
 			netStop();
 			return false;
@@ -847,7 +896,11 @@ bool netHost(const char* link) {
 		return false;
 	}
 	setStatus();
-	osd("Hosting on port %d", settings.netPort);
+	if (selfCount > 1) {
+		osd("Hosting on port %d, this device's controllers as %s", settings.netPort, playersText(self, selfCount));
+	} else {
+		osd("Hosting on port %d", settings.netPort);
+	}
 	return true;
 }
 
@@ -857,10 +910,6 @@ bool netHost(const char* link) {
 bool netJoin(const char* address, bool noCartridge) {
 	netStop();
 	if (noCartridge && !app.noCartridge && !loadNoCartridge()) {
-		return false;
-	}
-	if (!app.loaded) {
-		osd("Netplay: load your game first");
 		return false;
 	}
 	// name, name:port, [IPv6 address]:port, or an IPv6 address alone.
@@ -911,13 +960,18 @@ bool netJoin(const char* address, bool noCartridge) {
 	netScanStop();
 	useSocket(&connections[0], fd);
 	connections[0].id = 0;
+	connections[0].count = 1;
 	netMode = NET_JOINED;
 	resetSync();
 	struct retro_system_info info;
 	retro_get_system_info(&info);
-	uint8_t message[1 + 32 + 64] = { VERSION };
+	// The version, name, core version, how many players this device's controllers make, and whether
+	// it has a game, its own or its cartridge removed.
+	uint8_t message[1 + 32 + 64 + 2] = { VERSION };
 	snprintf((char*) message + 1, 32, "%s", settings.nickname);
 	snprintf((char*) message + 33, 64, "%s", info.library_version);
+	message[97] = (uint8_t) localPlayers();
+	message[98] = app.loaded;
 	sendTo(&connections[0], MSG_HELLO, message, sizeof(message));
 	setStatus();
 	return true;
@@ -949,8 +1003,14 @@ void netStop(void) {
 	}
 	freeStates();
 	restoreOptions();
+	if (heldWelcome) {
+		free(heldWelcome);
+		heldWelcome = NULL;
+		uiPickGame(NULL, NULL, NULL);
+	}
 	netMode = NET_OFF;
 	netTogether = false;
+	selfCount = 1;
 	libretroSetNetplayPlayer(-1);
 	setStatus();
 }
@@ -967,8 +1027,9 @@ int netPlayers(void) {
 			count += roll.joined[p] != INT_MAX && roll.left[p] == INT_MAX;
 		}
 	} else if (netMode == NET_HOSTING) {
+		count = selfCount;
 		for (int i = 0; i < PEERS; ++i) {
-			count += connections[i].fd >= 0 && connections[i].welcomed;
+			count += connections[i].fd >= 0 && connections[i].welcomed ? connections[i].count : 0;
 		}
 	}
 	return count;
@@ -1002,9 +1063,25 @@ static void refuse(struct Connection* c, const char* why) {
 }
 
 // The lowest player number not taken, or -1 when the game is full.
-static int freeId(void) {
-	for (int id = 1; id < playersMost(); ++id) {
-		if (!connectionFor(id)) {
+static bool taken(int id) {
+	for (int i = 0; i < PEERS; ++i) {
+		if (owns(&connections[i], id)) {
+			return true;
+		}
+	}
+	return isLocal(id);
+}
+
+// The lowest player number not taken, and how many free ones run on from it, up to wanted; -1 when
+// the game is full.
+static int freePlayers(int wanted, int* count) {
+	int const most = playersMost();
+	for (int id = 0; id < most; ++id) {
+		if (!taken(id)) {
+			*count = 1;
+			while (*count < wanted && id + *count < most && !taken(id + *count)) {
+				++*count;
+			}
 			return id;
 		}
 	}
@@ -1020,16 +1097,26 @@ static void hostHello(struct Connection* c, const uint8_t* p, size_t size) {
 		refuse(c, "The host runs another version of armGBA");
 		return;
 	}
-	int const id = freeId();
+	// Separate, each device plays its own game.
+	if (!netTogether && size >= 99 && !p[98]) {
+		osd("Netplay: %.31s can't join: on Link Mode Separate they need a game loaded", (const char*) p + 1);
+		refuse(c, "The host is on Link Mode Separate: load your own game, or set Your Cartridge to Removed");
+		return;
+	}
+	// Together, a player for each of the device's controllers, as many as there's room for.
+	int const wanted = netTogether && size >= 98 ? SDL_max(1, SDL_min(PEERS, p[97])) : 1;
+	int count = 0;
+	int const id = freePlayers(wanted, &count);
 	if (id < 0 || (!netTogether && packets && packets->connected && !packets->connected((uint16_t) id))) {
 		refuse(c, "The game is full");
 		return;
 	}
 	c->id = id;
+	c->count = count;
 	snprintf(c->nickname, sizeof(c->nickname), "%.31s", (const char*) p + 1);
-	// Mode, id, the number of options, the game's CRC, the firmware's CRC and the game's name, then
-	// each option's key and value.
-	size_t length = 12 + strlen(baseName(app.gamePath)) + 1;
+	// Mode, first player, the number of options, the game's CRC, the firmware's CRC, how many players,
+	// and the game's name, then each option's key and value.
+	size_t length = 13 + strlen(baseName(app.gamePath)) + 1;
 	for (int i = 0; i < optionCount; ++i) {
 		length += strlen(options[i].key) + strlen(sessionValue(options[i].key, options[i].value)) + 2;
 	}
@@ -1044,7 +1131,8 @@ static void hostHello(struct Connection* c, const uint8_t* p, size_t size) {
 	put32(message + 4, gameCrc());
 	const char* firmware;
 	put32(message + 8, libretroFirmwareCrc(&firmware));
-	char* at = (char*) message + 12;
+	message[12] = (uint8_t) count;
+	char* at = (char*) message + 13;
 	at += sprintf(at, "%s", baseName(app.gamePath)) + 1;
 	for (int i = 0; i < optionCount; ++i) {
 		at += sprintf(at, "%s", options[i].key) + 1;
@@ -1063,7 +1151,7 @@ static void hostHello(struct Connection* c, const uint8_t* p, size_t size) {
 // A player's connection closed: the others are told, Together from the frame after their last
 // buttons.
 static void playerGone(struct Connection* c) {
-	int const id = c->id;
+	int const id = c->id, count = c->count;
 	bool const welcomed = c->welcomed;
 	bool const turnedAway = c->turnedAway;
 	char name[32];
@@ -1076,12 +1164,14 @@ static void playerGone(struct Connection* c) {
 		osd("%s left", name);
 	}
 	if (netTogether) {
-		if (roll.joined[id] != INT_MAX && roll.left[id] == INT_MAX) {
-			roll.left[id] = roll.known[id] + 1;
-			uint8_t message[9] = { (uint8_t) id };
-			put32(message + 1, (uint32_t) roll.joined[id]);
-			put32(message + 5, (uint32_t) roll.left[id]);
-			sendOthers(id, MSG_PLAYER, message, sizeof(message));
+		for (int q = id; q < id + count; ++q) {
+			if (roll.joined[q] != INT_MAX && roll.left[q] == INT_MAX) {
+				roll.left[q] = roll.known[q] + 1;
+				uint8_t message[9] = { (uint8_t) q };
+				put32(message + 1, (uint32_t) roll.joined[q]);
+				put32(message + 5, (uint32_t) roll.left[q]);
+				sendOthers(id, MSG_PLAYER, message, sizeof(message));
+			}
 		}
 	} else if (packets && packets->disconnected) {
 		packets->disconnected((uint16_t) id);
@@ -1101,27 +1191,82 @@ static void cantJoin(int why, const char* game) {
 
 // The host's game, beside this device's game or in the game list's folder. The host gives a file's
 // name, never a path.
+static bool tryHostGame(const char* path, uint32_t crc) {
+	loadingForSession = true;
+	bool const loaded = access(path, R_OK) == 0 && loadGame(path);
+	loadingForSession = false;
+	return loaded && gameCrc() == crc;
+}
+
+// The host's game by its name in a folder, or in its subfolders depth levels down.
+static bool findHostGame(const char* folder, const char* name, uint32_t crc, int depth) {
+	char path[FILE_SIZE];
+	if (!folder[0]) {
+		return false;
+	}
+	snprintf(path, sizeof(path), "%s/%s", folder, name);
+	if (tryHostGame(path, crc)) {
+		return true;
+	}
+	DIR* const entries = depth > 0 ? opendir(folder) : NULL;
+	struct dirent* entry;
+	bool found = false;
+	while (entries && !found && (entry = readdir(entries))) {
+		struct stat info;
+		snprintf(path, sizeof(path), "%s/%s", folder, entry->d_name);
+		bool const folderHere = entry->d_type == DT_DIR || (entry->d_type == DT_UNKNOWN && !stat(path, &info) && S_ISDIR(info.st_mode));
+		found = entry->d_name[0] != '.' && folderHere && findHostGame(path, name, crc, depth - 1);
+	}
+	if (entries) {
+		closedir(entries);
+	}
+	return found;
+}
+
+static void clientWelcome(const uint8_t* p, size_t size);
+
+// A file chosen as the host's game: the welcome goes on if it is.
+static bool pickedHostGame(const char* path) {
+	if (!tryHostGame(path, get32(heldWelcome + 4))) {
+		osd("Netplay: that isn't %s, the host's game", heldGame);
+		return false;
+	}
+	uint8_t* const welcome = heldWelcome;
+	heldWelcome = NULL;
+	clientWelcome(welcome, heldWelcomeSize);
+	free(welcome);
+	return true;
+}
+
+// Leaving the game list without the host's game: the player can't join.
+static void heldWelcomeLeft(void) {
+	if (heldWelcome && !uiPickingGame()) {
+		cantJoin(CANT_GAME, heldGame);
+		osd("Netplay: you need %s to join", heldGame);
+		netStop();
+	}
+}
+
+// The host's game: the file of its name beside this device's game, in the game list's folder, the
+// Game Boy, Game Boy Color and Game Boy Advance folders, or the Games folder and its subfolders, and
+// only if its CRC is the host's game's. The host gives a file's name, never a path.
 static bool loadHostGame(const char* name, uint32_t crc) {
-	const char* folders[2] = { app.gamePath, settings.directory };
 	if (strchr(name, '/')) {
 		return false;
 	}
-	for (int i = 0; i < 2; ++i) {
-		char path[FILE_SIZE];
-		snprintf(path, sizeof(path), "%s", folders[i]);
-		char* end = i == 0 ? strrchr(path, '/') : path + strlen(path);
-		if (!end) {
-			continue;
-		}
-		snprintf(end, sizeof(path) - (end - path), "/%s", name);
-		loadingForSession = true;
-		bool const loaded = access(path, R_OK) == 0 && loadGame(path);
-		loadingForSession = false;
-		if (loaded && gameCrc() == crc) {
+	char beside[PATH_SIZE];
+	snprintf(beside, sizeof(beside), "%s", app.gamePath);
+	char* const slash = strrchr(beside, '/');
+	*(slash ? slash : beside) = '\0';
+	if (findHostGame(beside, name, crc, 0) || findHostGame(settings.directory, name, crc, 0)) {
+		return true;
+	}
+	for (int c = 0; c < CONSOLES; ++c) {
+		if (findHostGame(consoleDirectories[c], name, crc, 1)) {
 			return true;
 		}
 	}
-	return false;
+	return findHostGame(gamesDirectory, name, crc, 2);
 }
 
 // The text at *at, moving *at past it; NULL if it doesn't end before end.
@@ -1139,13 +1284,14 @@ static const char* takeText(const char** at, const char* end) {
 // host's options are taken; the host's state follows. Separate, the link cable starts.
 static void clientWelcome(const uint8_t* p, size_t size) {
 	const char* const end = (const char*) p + size;
-	const char* at = (const char*) p + 12;
-	const char* const game = size >= 12 ? takeText(&at, end) : NULL;
+	const char* at = (const char*) p + 13;
+	const char* const game = size >= 13 ? takeText(&at, end) : NULL;
 	if (!game || p[1] >= PEERS) {
 		return;
 	}
 	netTogether = p[0];
 	self = p[1];
+	selfCount = netTogether ? SDL_max(1, SDL_min(PEERS - self, p[12])) : 1;
 	libretroSetNetplayPlayer(self);
 	// Every device runs every console in Together and Off, so each needs the game.
 	if (netTogether && app.noCartridge) {
@@ -1155,6 +1301,16 @@ static void clientWelcome(const uint8_t* p, size_t size) {
 		return;
 	}
 	if (netTogether && gameCrc() != get32(p + 4) && !loadHostGame(game, get32(p + 4))) {
+		// Not found by its name: the player can choose their copy, under another name.
+		heldWelcome = malloc(size);
+		if (heldWelcome) {
+			memcpy(heldWelcome, p, size);
+			heldWelcomeSize = size;
+			snprintf(heldGame, sizeof(heldGame), "%s", game);
+			osd("Netplay: %s isn't in your folders by that name: choose your copy", game);
+			uiPickGame("Choose Your Copy", game, pickedHostGame);
+			return;
+		}
 		cantJoin(CANT_GAME, game);
 		osd("Netplay: you need %s to join", game);
 		netStop();
@@ -1198,7 +1354,11 @@ static void clientWelcome(const uint8_t* p, size_t size) {
 			return;
 		}
 		sendTo(&connections[0], MSG_READY, NULL, 0);
-		osd("Joined as player %d", self + 1);
+		if (selfCount < localPlayers()) {
+			osd("Joined as %s; the game had no room for your other controllers", playersText(self, selfCount));
+		} else {
+			osd("Joined as %s", playersText(self, selfCount));
+		}
 	} else {
 		if (linkMode("separate")) {
 			osd("Restarted for the link cable");
@@ -1262,7 +1422,7 @@ static void handle(struct Connection* c, int type, const uint8_t* p, size_t size
 		if (host && netTogether) {
 			c->wantsState = true;
 			if (type == MSG_READY) {
-				osd("%s joined", c->nickname);
+				osd("%s joined as %s", c->nickname, playersText(c->id, c->count));
 			}
 		}
 		break;
@@ -1272,7 +1432,7 @@ static void handle(struct Connection* c, int type, const uint8_t* p, size_t size
 		}
 		break;
 	case MSG_PLAYER:
-		if (!host && size >= 9 && p[0] < PEERS && p[0] != self && isFrame(p + 1) && isFrame(p + 5)) {
+		if (!host && size >= 9 && p[0] < PEERS && !isLocal(p[0]) && isFrame(p + 1) && isFrame(p + 5)) {
 			int const q = p[0];
 			roll.joined[q] = (int) get32(p + 1);
 			roll.left[q] = (int) get32(p + 5);
@@ -1287,7 +1447,7 @@ static void handle(struct Connection* c, int type, const uint8_t* p, size_t size
 			break;
 		}
 		int const player = p[0], first = (int) get32(p + 1), count = SDL_min(p[5], (int) (size - 10) / 2);
-		if (host && player != c->id) {
+		if (host ? !owns(c, player) : isLocal(player)) {
 			break;
 		}
 		for (int i = 0; i < count; ++i) {
@@ -1384,6 +1544,10 @@ static bool readFrom(struct Connection* c) {
 static void answerProbes(void);
 
 static void pump(void) {
+	heldWelcomeLeft();
+	if (netMode == NET_OFF) {
+		return;
+	}
 	answerProbes();
 	int fd;
 	while (listener >= 0 && (fd = accept(listener, NULL, NULL)) >= 0) {
@@ -1510,8 +1674,8 @@ static void answerProbes(void) {
 			answer[10] = (uint8_t) netPlayers();
 			answer[11] = (uint8_t) playersMost();
 			put16(answer + 12, (unsigned) settings.netPort);
-			snprintf((char*) answer + 14, 32, "%s", settings.nickname);
-			snprintf((char*) answer + 46, 128, "%s", app.gameName);
+			snprintf((char*) answer + 14, 32, "%.31s", settings.nickname);
+			snprintf((char*) answer + 46, 128, "%.127s", app.gameName);
 			const char* const shared = optionValue("armgba_shared_controls");
 			answer[174] = !strcmp(shared, "everyone") ? 1 : !strcmp(shared, "pass around") ? 2 : 0;
 			sendto(answerer, answer, sizeof(answer), 0, (struct sockaddr*) &from, length);
@@ -1616,6 +1780,12 @@ void netScanStop(void) {
 		scanner = -1;
 	}
 	foundCount = 0;
+}
+
+// With no game loaded, netplay's messages are still read, as a device that joined without one waits
+// for the host's welcome to load its game.
+void netIdle(void) {
+	pump();
 }
 
 // No connections yet.

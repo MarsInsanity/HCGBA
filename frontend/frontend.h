@@ -128,6 +128,8 @@ struct Settings {
 	// Swap A/B and X/Y: off, A is the right face button, as on a Game Boy and in RetroArch; on, A is
 	// the bottom one, on every controller.
 	bool swapFaceButtons;
+	// Each player's controller, as SDL's GUID, put back in its place when it connects; "" for any.
+	char playerPads[PORTS][33];
 	// The menus' look: the accent color, their size as a percentage, and how far the game behind them
 	// is dimmed (0 to 2).
 	int accent;
@@ -232,6 +234,8 @@ const char* retroarchFolder(const char* which);
 void writeSaves(void);
 void runFrames(void);
 void setPadForPort(void);
+void swapPlayers(int a, int b);
+const char* playerPadName(int port);
 uint16_t localButtons(unsigned port);
 
 // settings.c
@@ -276,6 +280,8 @@ void requestQuit(bool controller);
 bool uiInit(void);
 void uiRecreateTextures(void);
 void uiOpenMenu(void);
+void uiPickGame(const char* title, const char* wanted, bool (*picked)(const char* path));
+bool uiPickingGame(void);
 void uiCloseMenu(void);
 bool uiEvent(const SDL_Event* event);
 void uiDraw(void);
@@ -358,6 +364,7 @@ void netScanStop(void);
 bool netJoin(const char* address, bool noCartridge);
 void netStop(void);
 void netFrame(void);
+void netIdle(void);
 bool netPacketInterface(const struct retro_netpacket_callback* callback);
 int netPlayers(void);
 bool netRunning(void);
