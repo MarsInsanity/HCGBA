@@ -31,7 +31,10 @@ export SF3000_SYSROOT=/path/to/sdk/mipsel-buildroot-linux-gnu/sysroot
 sh picoarch/build-sf3000.sh
 ```
 
-The output is `build-sf3000/hcgba_libretro.so`.
+The outputs are `build-sf3000/hcgba_libretro.so` and `build-sf3000/hcgba-bench`.
+The SDK compiler uses `-mtune=74kc` with the existing MIPS32r2 instruction set.
+This schedules compiled core code for the 74Kc without enabling DSP extensions.
+The portable Zig fallback below uses generic MIPS32r2 scheduling.
 
 A portable fallback, validated with Zig 0.13.0, is:
 
@@ -94,6 +97,46 @@ for diagnostics. The cache is single-threaded and is cleared on state reload.
 The port translates ALU operations rather than whole linked basic blocks.
 Per-instruction dispatch and exact bus timing remain performance costs.
 Do not interpret the presence of a native emitter as a speed guarantee.
+
+## Single-core 74Kc performance
+
+The compact core runs CPU, rendering, and audio on the calling thread. It does
+not start a render worker, copy frames to a worker, or use a worker log/atomic
+queue. The generated CPU leaf functions use integer registers only. The shared
+library still follows the firmware's hard-float ABI; compiler tuning does not
+change that ABI or establish whether a particular board has floating-point hardware.
+
+Use the SDK-built benchmark on the handheld with the same ROM and BIOS as
+picoarch. It runs without throttling and reports mean, p95, p99 and maximum
+frame cost, frames over budget, and CPU time headroom. For example:
+
+```sh
+./hcgba-bench ./hcgba_libretro.so /path/to/game.gba 3600 cached 300
+./hcgba-bench ./hcgba_libretro.so /path/to/game.gba 3600 exact 300
+HCGBA_NO_NATIVE=1 ./hcgba-bench ./hcgba_libretro.so /path/to/game.gba 3600 cached 300
+```
+
+On a multicore test machine, prefix these commands with `taskset -c 0` to
+restrict them to one available CPU (choose an allowed CPU if 0 is unavailable).
+A single-core handheld needs no affinity setting. Record CPU clock/governor,
+firmware, core commit, BIOS/ROM hashes and scene with results. Set
+`HCGBA_BIOS_DIR` to a directory containing `gba_bios.bin` to use that BIOS.
+An optional final argument loads a raw HCGBA libretro save state before warmup;
+this lets measurements start in a demanding scene. The benchmark presses no
+buttons, so verify that the scene remains representative while it runs.
+
+The GBA frame budget is approximately 16.74 ms. A useful engineering target
+is mean core time below 80% of that budget and p99 below the budget, leaving
+room for picoarch's video/audio handling. This is a target, not a measured claim.
+The headless benchmark excludes display submission and audio output/resampling;
+check sustained audio and gameplay in picoarch too. QEMU timings are not 74Kc
+performance measurements. The `--synthetic` workload exercises an original ARM
+ALU loop for smoke tests only; it does not predict game performance.
+
+Compare all three execution modes: native per-instruction call and cache-miss
+costs can outweigh decode savings in some workloads. Do not assume that native
+code is faster until these measurements confirm it. No frameskip or timing
+shortcuts are enabled to conceal missed frame budgets.
 
 ## Validation
 

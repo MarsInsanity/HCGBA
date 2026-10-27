@@ -16,15 +16,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ninja-build gcc-mipsel-linux-gnu qemu-user
       - name: Host cached CPU and libretro tests
         run: |
-          cmake -S . -B build-host -G Ninja -DHCGBA_PICOARCH=ON -DHCGBA_CACHED_CPU=ON -DHCGBA_LTO=OFF
+          cmake -S . -B build-host -G Ninja -DHCGBA_PICOARCH=ON -DHCGBA_BENCHMARK=ON -DHCGBA_CACHED_CPU=ON -DHCGBA_LTO=OFF
           cmake --build build-host --parallel 2
           ctest --test-dir build-host --output-on-failure
       - name: Cross compile and execute native MIPS code
         run: |
-          cmake -S . -B build-mips -G Ninja -DHCGBA_PICOARCH=ON -DHCGBA_LTO=OFF \
+          cmake -S . -B build-mips -G Ninja -DHCGBA_PICOARCH=ON -DHCGBA_BENCHMARK=ON -DHCGBA_LTO=OFF \
             -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=mipsel \
             -DCMAKE_C_COMPILER=mipsel-linux-gnu-gcc \
-            '-DCMAKE_C_FLAGS=-EL -mabi=32 -march=mips32r2 -mfp32 -mhard-float -fno-strict-aliasing' \
+            '-DCMAKE_C_FLAGS=-EL -mabi=32 -march=mips32r2 -mtune=74kc -mfp32 -mhard-float -fno-strict-aliasing' \
             '-DCMAKE_CROSSCOMPILING_EMULATOR=qemu-mipsel;-L;/usr/mipsel-linux-gnu'
           cmake --build build-mips --parallel 2
           ctest --test-dir build-mips --output-on-failure
@@ -32,7 +32,7 @@ jobs:
           mipsel-linux-gnu-readelf -h -A -d build-mips/hcgba_libretro.so
       - name: Exact interpreter build
         run: |
-          cmake -S . -B build-exact -G Ninja -DHCGBA_PICOARCH=ON -DARMGBA_JIT=OFF -DHCGBA_LTO=OFF
+          cmake -S . -B build-exact -G Ninja -DHCGBA_PICOARCH=ON -DHCGBA_BENCHMARK=ON -DARMGBA_JIT=OFF -DHCGBA_LTO=OFF
           cmake --build build-exact --parallel 2
           ctest --test-dir build-exact --output-on-failure
   sf3000:
@@ -60,10 +60,10 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp build-sf3000/hcgba_libretro.so picoarch/hcgba_libretro.info picoarch/README.md dist/
+          cp build-sf3000/hcgba_libretro.so build-sf3000/hcgba-bench picoarch/hcgba_libretro.info picoarch/README.md picoarch/VALIDATION.md dist/
           cp LICENSE LICENSES/MPL-2.0.txt dist/
-          "${CROSS_COMPILE}strip" dist/hcgba_libretro.so
-          sha256sum dist/hcgba_libretro.so > dist/SHA256SUMS
+          "${CROSS_COMPILE}strip" dist/hcgba_libretro.so dist/hcgba-bench
+          sha256sum dist/hcgba_libretro.so dist/hcgba-bench > dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: hcgba-sf3000-mips32

@@ -26,6 +26,11 @@ The Windows host tests used temporary adapters for POSIX time/file/dynamic
 loading APIs. These adapters are not compiled into the handheld core.
 The source's CTest suite is intended to run on Linux and under qemu-mipsel.
 
+GitHub Actions run [40587028462](https://github.com/MarsInsanity/HCGBA/actions/runs/40587028462)
+also passed the Linux host, exact-interpreter, QEMU native-MIPS and disabled-native
+tests, and built the core using the pinned SF3000 GCC SDK. This run validated
+commit `a52940a`; 74Kc tuning and the benchmark were added subsequently.
+
 ## Not established
 
 - Actual SF3000/R36S loading and performance.
@@ -34,8 +39,7 @@ The source's CTest suite is intended to run on Linux and under qemu-mipsel.
 - Full-library coverage, real-device instruction-cache behavior, or sustained
   audio behavior on the handheld.
 - Multiplayer behavior of the inherited full frontend.
-- Execution of the Linux MIPS CTest binaries under QEMU in this session.
-- The GCC SDK CI workflow has not yet been run here.
+
 
 The downloadable core is an experimental test build, not a performance-certified
 release. Its build command is reproducible with `picoarch/build-zig.py`.
